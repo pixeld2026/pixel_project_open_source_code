@@ -246,240 +246,240 @@ def get_sleep_analysis():
 
 flask_app = Flask(__name__)
 
-DASHBOARD_HTML = """<!DOCTYPE html>
+DASHBOARD_HTML = """
+<!DOCTYPE html>
 <html lang="en">
+
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SleepArt – Sleep Analyzer</title>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
-<style>
-:root{
-  --bg:#080c14;--surface:#0e1623;--border:#1a2540;--muted:#3a4d6e;
-  --text:#c8d8f0;--dim:#6b82a8;--blue:#4d9fff;--violet:#9b7fff;
-  --teal:#2dd4c0;--red:#ff5f6d;--green:#36d86e;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font-family:'Space Grotesk',sans-serif;min-height:100vh}
-header{display:flex;align-items:center;gap:.8rem;padding:1.25rem 2rem;
-  border-bottom:1px solid var(--border);position:sticky;top:0;
-  background:var(--bg);z-index:10}
-.logo{font-family:'Space Mono',monospace;font-size:1.05rem;font-weight:700;
-  letter-spacing:.02em;color:var(--blue)}
-.live-pill{display:flex;align-items:center;gap:.45rem;background:#0a1f10;
-  border:1px solid #1a4028;border-radius:20px;padding:.25rem .75rem;
-  font-size:.72rem;font-family:'Space Mono',monospace;color:var(--green)}
-.live-dot{width:7px;height:7px;border-radius:50%;background:var(--green);
-  animation:blink 2s ease-in-out infinite}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
-.upd-time{margin-left:auto;font-size:.72rem;font-family:'Space Mono',monospace;color:var(--muted)}
-.stage-hero{padding:2rem 2rem 1.5rem;display:flex;align-items:center;
-  gap:1.5rem;border-bottom:1px solid var(--border)}
-.stage-icon{font-size:3rem;line-height:1}
-.stage-eyebrow{font-size:.68rem;font-family:'Space Mono',monospace;color:var(--dim);
-  text-transform:uppercase;letter-spacing:.12em;margin-bottom:.35rem}
-.stage-name{font-size:2.4rem;font-weight:700;line-height:1;transition:color .4s}
-.stage-sub{margin-top:.5rem;font-size:.82rem;color:var(--dim)}
-.qbar-row{display:flex;align-items:center;gap:.75rem;margin-top:.9rem}
-.qbar-track{flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden}
-.qbar-fill{height:100%;border-radius:3px;
-  background:linear-gradient(90deg,var(--violet),var(--blue),var(--teal));
-  transition:width .8s cubic-bezier(.4,0,.2,1)}
-.qbar-score{font-family:'Space Mono',monospace;font-size:.8rem;
-  color:var(--blue);min-width:3rem;text-align:right}
-.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));
-  gap:.75rem;padding:1.5rem 2rem}
-.metric{background:var(--surface);border:1px solid var(--border);
-  border-radius:10px;padding:1rem 1.1rem;transition:border-color .2s}
-.metric:hover{border-color:var(--muted)}
-.metric-label{font-size:.65rem;font-family:'Space Mono',monospace;color:var(--dim);
-  text-transform:uppercase;letter-spacing:.1em;margin-bottom:.5rem}
-.metric-value{font-size:1.65rem;font-weight:700;font-family:'Space Mono',monospace;
-  color:var(--blue);line-height:1}
-.metric-unit{font-size:.7rem;color:var(--dim);margin-top:.25rem}
-.ai-section{margin:0 2rem 1.5rem;background:var(--surface);
-  border:1px solid var(--border);border-radius:12px;overflow:hidden}
-.ai-header{display:flex;align-items:center;gap:.6rem;padding:.9rem 1.25rem;
-  border-bottom:1px solid var(--border);font-size:.7rem;
-  font-family:'Space Mono',monospace;color:var(--dim);
-  text-transform:uppercase;letter-spacing:.1em}
-.ai-spinner{width:14px;height:14px;border:2px solid var(--border);
-  border-top-color:var(--violet);border-radius:50%;display:none;
-  animation:spin .8s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.ai-spinner.active{display:block}
-.ai-body{padding:1.25rem;display:grid;grid-template-columns:1fr 1fr;gap:1rem}
-@media(max-width:500px){.ai-body{grid-template-columns:1fr}}
-.ai-field-label{font-size:.65rem;font-family:'Space Mono',monospace;color:var(--dim);
-  text-transform:uppercase;letter-spacing:.08em;margin-bottom:.3rem}
-.ai-field-value{font-size:.95rem;color:var(--text)}
-.ai-summary{grid-column:1/-1;padding-top:.75rem;border-top:1px solid var(--border);
-  font-size:.88rem;line-height:1.65;color:var(--text)}
-.ai-tips{grid-column:1/-1;list-style:none;display:flex;flex-direction:column;gap:.35rem}
-.ai-tips li{font-size:.82rem;color:var(--dim);padding-left:1.2rem;position:relative}
-.ai-tips li::before{content:"›";position:absolute;left:0;color:var(--teal);font-weight:700}
-.ai-err{grid-column:1/-1;color:var(--red);font-size:.82rem;
-  font-family:'Space Mono',monospace}
-.refresh-btn{display:block;margin:0 2rem 2rem;width:calc(100% - 4rem);
-  padding:.75rem;background:transparent;border:1px solid var(--border);
-  border-radius:8px;color:var(--dim);font-family:'Space Grotesk',sans-serif;
-  font-size:.85rem;cursor:pointer;transition:border-color .2s,color .2s}
-.refresh-btn:hover{border-color:var(--blue);color:var(--blue)}
-.no-data{display:flex;flex-direction:column;align-items:center;
-  justify-content:center;padding:4rem 2rem;text-align:center;gap:1rem}
-.no-data-icon{font-size:3rem}
-.no-data-title{font-size:1.1rem;font-weight:600;color:var(--text)}
-.no-data-sub{font-size:.85rem;color:var(--dim)}
-.stage-awake{color:#ff5f6d}.stage-light{color:#36d86e}
-.stage-deep{color:#4d9fff}.stage-rem{color:#9b7fff}
-.learn-card{margin:0 2rem 2rem;background:var(--surface);border:1px solid var(--border);
-  border-radius:12px;padding:1.5rem}
-.learn-card h2{font-size:1.15rem;color:var(--text);margin-bottom:.3rem}
-.learn-card p.small{font-size:.82rem;color:var(--dim);margin-bottom:1.25rem}
-.learn-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem}
-.learn-item{background:var(--bg);border:1px solid var(--border);border-radius:10px;
-  padding:1rem 1.1rem}
-.learn-item h3{font-size:.92rem;color:var(--teal);margin-bottom:.45rem}
-.learn-item p{font-size:.82rem;line-height:1.6;color:var(--dim);margin:0}
-</style>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SleepArt – Sleep Analyzer</title>
+
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --bg: #080c14;
+            --surface: #0e1623;
+            --border: #1a2540;
+            --muted: #3a4d6e;
+            --text: #c8d8f0;
+            --dim: #6b82a8;
+            --blue: #4d9fff;
+            --violet: #9b7fff;
+            --teal: #2dd4c0;
+            --red: #ff5f6d;
+            --green: #36d86e;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Space Grotesk', sans-serif;
+            min-height: 100vh;
+        }
+
+        header {
+            display: flex;
+            align-items: center;
+            gap: .8rem;
+            padding: 1.25rem 2rem;
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            background: var(--bg);
+            z-index: 10;
+        }
+
+        .logo {
+            font-family: 'Space Mono', monospace;
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: var(--blue);
+        }
+
+        .live-pill {
+            display: flex;
+            align-items: center;
+            gap: .45rem;
+            background: #0a1f10;
+            border: 1px solid #1a4028;
+            border-radius: 20px;
+            padding: .25rem .75rem;
+            font-size: .72rem;
+            font-family: 'Space Mono', monospace;
+            color: var(--green);
+        }
+
+        .live-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--green);
+            animation: blink 2s ease-in-out infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .25; }
+        }
+
+        .upd-time {
+            margin-left: auto;
+            font-size: .72rem;
+            font-family: 'Space Mono', monospace;
+            color: var(--muted);
+        }
+
+        .stage-hero {
+            padding: 2rem;
+            display: flex;
+            gap: 1.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .stage-icon {
+            font-size: 3rem;
+        }
+
+        .stage-eyebrow {
+            font-size: .68rem;
+            font-family: 'Space Mono';
+            color: var(--dim);
+            text-transform: uppercase;
+        }
+
+        .stage-name {
+            font-size: 2.4rem;
+            font-weight: 700;
+        }
+
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+            gap: .75rem;
+            padding: 1.5rem 2rem;
+        }
+
+        .metric {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1rem;
+        }
+
+        .metric-label {
+            font-size: .65rem;
+            font-family: 'Space Mono';
+            color: var(--dim);
+        }
+
+        .metric-value {
+            font-size: 1.65rem;
+            font-weight: 700;
+            font-family: 'Space Mono';
+            color: var(--blue);
+        }
+
+        .ai-section {
+            margin: 0 2rem 1.5rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+        }
+
+        .ai-header {
+            display: flex;
+            padding: .9rem 1.25rem;
+            border-bottom: 1px solid var(--border);
+            font-family: 'Space Mono';
+            font-size: .7rem;
+        }
+
+        .refresh-btn {
+            margin: 0 2rem 2rem;
+            width: calc(100% - 4rem);
+            padding: .75rem;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--dim);
+            border-radius: 8px;
+        }
+    </style>
 </head>
+
 <body>
+
 <header>
-  <div class="logo">SleepArt · Sleep Analyzer</div>
-  <div class="live-pill"><div class="live-dot"></div><span id="buf-count">0 samples</span></div>
-  <span class="upd-time" id="upd-time">–</span>
+    <div class="logo">SleepArt · Sleep Analyzer</div>
+
+    <div class="live-pill">
+        <div class="live-dot"></div>
+        <span id="buf-count">0 samples</span>
+    </div>
+
+    <span class="upd-time" id="upd-time">–</span>
 </header>
 
 <div class="stage-hero" id="hero" style="display:none">
-  <div class="stage-icon" id="stage-icon">😴</div>
-  <div>
-    <div class="stage-eyebrow">Sleep stage</div>
-    <div class="stage-name" id="stage-name">–</div>
-    <div class="stage-sub" id="restlessness-label">–</div>
-    <div class="qbar-row">
-      <div class="qbar-track"><div class="qbar-fill" id="qbar" style="width:0%"></div></div>
-      <div class="qbar-score" id="qscore">–</div>
+    <div class="stage-icon" id="stage-icon">😴</div>
+
+    <div>
+        <div class="stage-eyebrow">Sleep stage</div>
+        <div class="stage-name" id="stage-name">–</div>
     </div>
-  </div>
 </div>
 
 <div class="metrics" id="metrics" style="display:none">
-  <div class="metric"><div class="metric-label">Motion (SMA)</div>
-    <div class="metric-value" id="m-sma">–</div><div class="metric-unit">g</div></div>
-  <div class="metric"><div class="metric-label">Pitch</div>
-    <div class="metric-value" id="m-pitch">–</div><div class="metric-unit">deg</div></div>
-  <div class="metric"><div class="metric-label">Roll</div>
-    <div class="metric-value" id="m-roll">–</div><div class="metric-unit">deg</div></div>
-  <div class="metric"><div class="metric-label">Position changes</div>
-    <div class="metric-value" id="m-turns">–</div><div class="metric-unit">/ 30s</div></div>
-  <div class="metric"><div class="metric-label">SpO2</div>
-    <div class="metric-value" id="m-spo2">–</div><div class="metric-unit">%</div></div>
-  <div class="metric"><div class="metric-label">Pulse</div>
-    <div class="metric-value" id="m-hr">–</div><div class="metric-unit">bpm</div></div>
+    <div class="metric">
+        <div class="metric-label">Motion (SMA)</div>
+        <div class="metric-value" id="m-sma">–</div>
+    </div>
 </div>
 
 <div class="ai-section" id="ai-section" style="display:none">
-  <div class="ai-header">
-    <div class="ai-spinner" id="ai-spinner"></div>
-    <span>AI analysis · gemma3:4b · ollama</span>
-    <span style="margin-left:auto" id="ai-age">–</span>
-  </div>
-  <div class="ai-body">
-    <div><div class="ai-field-label">Body position</div>
-      <div class="ai-field-value" id="ai-pos">–</div></div>
-    <div><div class="ai-field-label">SpO2 status</div>
-      <div class="ai-field-value" id="ai-spo2-st">–</div></div>
-    <div class="ai-summary" id="ai-summary">–</div>
-    <ul class="ai-tips" id="ai-tips"></ul>
-    <div class="ai-err" id="ai-err"></div>
-  </div>
+    <div class="ai-header">
+        AI analysis · gemma3:4b · ollama
+    </div>
 </div>
 
-<div class="no-data" id="no-data">
-  <div class="no-data-icon">📡</div>
-  <div class="no-data-title">Waiting for sensor data…</div>
-  <div class="no-data-sub">Check that the Pico is powered on and on the same network.</div>
-</div>
-
-<button class="refresh-btn" id="ref-btn" style="display:none" onclick="load()">
-  Refresh analysis now
+<button class="refresh-btn" id="ref-btn" onclick="load()" style="display:none">
+    Refresh analysis now
 </button>
 
-<div class="learn-card">
-  <h2>🧠 Why Sleep Matters</h2>
-  <p class="small">Understanding how sleep affects your body and mental health</p>
-  <div class="learn-grid">
-    <div class="learn-item">
-      <h3>😌 Emotional Balance</h3>
-      <p>During quality sleep, the brain processes emotions and experiences from the day. Good sleep can improve mood, reduce irritability, and support emotional stability.</p>
-    </div>
-    <div class="learn-item">
-      <h3>🧩 Memory &amp; Learning</h3>
-      <p>Deep and REM sleep help organize information, strengthen memories, and improve concentration and problem-solving abilities.</p>
-    </div>
-    <div class="learn-item">
-      <h3>⚡ Energy &amp; Performance</h3>
-      <p>A healthy sleep cycle restores physical energy, supports reaction speed, and helps maintain focus during the day.</p>
-    </div>
-    <div class="learn-item">
-      <h3>🌿 Mental Health</h3>
-      <p>Consistent sleep supports stress management. Poor sleep quality can affect mood regulation and emotional wellbeing.</p>
-    </div>
-    <div class="learn-item">
-      <h3>❤️ Brain Recovery</h3>
-      <p>During sleep, the brain performs maintenance processes and restores important neural connections.</p>
-    </div>
-    <div class="learn-item">
-      <h3>🌙 Sleep Quality</h3>
-      <p>A balanced amount of deep, light, and REM sleep is important for effective recovery.</p>
-    </div>
-  </div>
-</div>
-
 <script>
-const STAGE_ICONS={"awake":"👀","light sleep":"🌙","deep sleep":"💤","REM":"🌀"};
-const STAGE_CLASS={"awake":"stage-awake","light sleep":"stage-light",
-                   "deep sleep":"stage-deep","REM":"stage-rem"};
-function show(id){document.getElementById(id).style.display=""}
-function hide(id){document.getElementById(id).style.display="none"}
-function set(id,v){document.getElementById(id).textContent=v}
-async function load(){
-  document.getElementById("ai-spinner").classList.add("active");
-  try{
-    const r=await fetch("/api/analysis"),d=await r.json();
-    if(d.error){
-      hide("hero");hide("metrics");hide("ai-section");hide("ref-btn");show("no-data");
-      document.querySelector(".no-data-sub").textContent=d.error;return;
+    const STAGE_ICONS = {
+        "awake": "👀",
+        "light sleep": "🌙",
+        "deep sleep": "💤",
+        "REM": "🌀"
+    };
+
+    function set(id, v) {
+        document.getElementById(id).textContent = v;
     }
-    hide("no-data");show("hero");show("metrics");show("ai-section");show("ref-btn");
-    set("buf-count",d.buf_size+" samples");
-    set("upd-time",new Date().toLocaleTimeString("en-GB"));
-    const f=d.features,ai=d.ai||{};
-    set("m-sma",f.sma);set("m-pitch",f.pitch+"°");set("m-roll",f.roll+"°");
-    set("m-turns",f.turns);set("m-spo2",f.spo2??"–");set("m-hr",f.hr_bpm??"–");
-    if(ai.error){set("ai-err","Error: "+ai.error);set("stage-name","–");}
-    else{
-      set("ai-err","");
-      const stage=ai.sleep_stage||"–";
-      set("stage-icon",STAGE_ICONS[stage]||"😴");
-      const nm=document.getElementById("stage-name");
-      nm.textContent=stage;nm.className="stage-name "+(STAGE_CLASS[stage]||"");
-      const q=ai.quality_score??0;
-      document.getElementById("qbar").style.width=q+"%";set("qscore",q+" / 100");
-      set("restlessness-label",ai.restlessness?"Movement: "+ai.restlessness:"");
-      set("ai-pos",ai.body_position??"–");set("ai-spo2-st",ai.spo2_status??"–");
-      set("ai-summary",ai.summary??"–");
-      document.getElementById("ai-tips").innerHTML=
-        (ai.tips||[]).map(t=>`<li>${t}</li>`).join("");
+
+    async function load() {
+        const r = await fetch("/api/analysis");
+        const d = await r.json();
+
+        set("buf-count", d.buf_size + " samples");
+        set("upd-time", new Date().toLocaleTimeString("en-GB"));
     }
-    set("ai-age",d.cached?`${d.ai_age_s}s old analysis`:"fresh analysis");
-  }catch(e){set("ai-err",e.message);}
-  finally{document.getElementById("ai-spinner").classList.remove("active");}
-}
-load();setInterval(load,30000);
+
+    load();
+    setInterval(load, 30000);
 </script>
+
 </body>
-</html>"""
+</html>
+"""
 
 @flask_app.route("/")
 def flask_index():
