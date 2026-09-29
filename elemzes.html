@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SleepArt – Sleep Analyzer</title>
+
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --bg: #080c14;
+            --surface: #0e1623;
+            --border: #1a2540;
+            --muted: #3a4d6e;
+            --text: #c8d8f0;
+            --dim: #6b82a8;
+            --blue: #4d9fff;
+            --violet: #9b7fff;
+            --teal: #2dd4c0;
+            --red: #ff5f6d;
+            --green: #36d86e;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Space Grotesk', sans-serif;
+            min-height: 100vh;
+        }
+
+        header {
+            display: flex;
+            align-items: center;
+            gap: .8rem;
+            padding: 1.25rem 2rem;
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            background: var(--bg);
+            z-index: 10;
+        }
+
+        .logo {
+            font-family: 'Space Mono', monospace;
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: var(--blue);
+        }
+
+        .live-pill {
+            display: flex;
+            align-items: center;
+            gap: .45rem;
+            background: #0a1f10;
+            border: 1px solid #1a4028;
+            border-radius: 20px;
+            padding: .25rem .75rem;
+            font-size: .72rem;
+            font-family: 'Space Mono', monospace;
+            color: var(--green);
+        }
+
+        .live-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--green);
+            animation: blink 2s ease-in-out infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .25; }
+        }
+
+        .upd-time {
+            margin-left: auto;
+            font-size: .72rem;
+            font-family: 'Space Mono', monospace;
+            color: var(--muted);
+        }
+
+        .stage-hero {
+            padding: 2rem;
+            display: flex;
+            gap: 1.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .stage-icon {
+            font-size: 3rem;
+        }
+
+        .stage-eyebrow {
+            font-size: .68rem;
+            font-family: 'Space Mono';
+            color: var(--dim);
+            text-transform: uppercase;
+        }
+
+        .stage-name {
+            font-size: 2.4rem;
+            font-weight: 700;
+        }
+
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+            gap: .75rem;
+            padding: 1.5rem 2rem;
+        }
+
+        .metric {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1rem;
+        }
+
+        .metric-label {
+            font-size: .65rem;
+            font-family: 'Space Mono';
+            color: var(--dim);
+        }
+
+        .metric-value {
+            font-size: 1.65rem;
+            font-weight: 700;
+            font-family: 'Space Mono';
+            color: var(--blue);
+        }
+
+        .ai-section {
+            margin: 0 2rem 1.5rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+        }
+
+        .ai-header {
+            display: flex;
+            padding: .9rem 1.25rem;
+            border-bottom: 1px solid var(--border);
+            font-family: 'Space Mono';
+            font-size: .7rem;
+        }
+
+        .refresh-btn {
+            margin: 0 2rem 2rem;
+            width: calc(100% - 4rem);
+            padding: .75rem;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--dim);
+            border-radius: 8px;
+        }
+    </style>
+</head>
+
+<body>
+
+<header>
+    <div class="logo">SleepArt · Sleep Analyzer</div>
+
+    <div class="live-pill">
+        <div class="live-dot"></div>
+        <span id="buf-count">0 samples</span>
+    </div>
+
+    <span class="upd-time" id="upd-time">–</span>
+</header>
+
+<div class="stage-hero" id="hero" style="display:none">
+    <div class="stage-icon" id="stage-icon">😴</div>
+
+    <div>
+        <div class="stage-eyebrow">Sleep stage</div>
+        <div class="stage-name" id="stage-name">–</div>
+    </div>
+</div>
+
+<div class="metrics" id="metrics" style="display:none">
+    <div class="metric">
+        <div class="metric-label">Motion (SMA)</div>
+        <div class="metric-value" id="m-sma">–</div>
+    </div>
+</div>
+
+<div class="ai-section" id="ai-section" style="display:none">
+    <div class="ai-header">
+        AI analysis · gemma3:4b · ollama
+    </div>
+</div>
+
+<button class="refresh-btn" id="ref-btn" onclick="load()" style="display:none">
+    Refresh analysis now
+</button>
+
+<script>
+    const STAGE_ICONS = {
+        "awake": "👀",
+        "light sleep": "🌙",
+        "deep sleep": "💤",
+        "REM": "🌀"
+    };
+
+    function set(id, v) {
+        document.getElementById(id).textContent = v;
+    }
+
+    async function load() {
+        const r = await fetch("/api/analysis");
+        const d = await r.json();
+
+        set("buf-count", d.buf_size + " samples");
+        set("upd-time", new Date().toLocaleTimeString("en-GB"));
+    }
+
+    load();
+    setInterval(load, 30000);
+</script>
+
+</body>
+</html>
