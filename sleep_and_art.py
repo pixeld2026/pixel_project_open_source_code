@@ -1,201 +1,296 @@
-import socket, json, math, random, os, time, threading
+import asyncio
+import json
+import time
+import math
+import random
+import threading
+import socket
 from collections import deque
 from datetime import datetime
 
+import numpy as np
 import pygame
 import requests
 from flask import Flask, jsonify, render_template_string
+from bleak import BleakClient, BleakScanner
 
-UDP_PORT         = 5005
+SERVICE_UUID = "4fa8c2d1-8253-4243-9780-7005a3674630"
+CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+CYCLE_DURATION = 300.0  # 5 perc
+CANVAS_W, CANVAS_H = 1000, 600
+
+# ---------- AI / WEB beállítások ----------
 FLASK_PORT       = 5000
-SESSION_SECONDS  = 300          
-CYCLE_SECONDS    = 10           
-SAMPLE_RATE      = 20
-BPM_WINDOW       = 5
-SAVE_DIR         = "cosmos_output"
-os.makedirs(SAVE_DIR, exist_ok=True)
+OLLAMA_URL       = "http://localhost:11434/api/generate"
+OLLAMA_MODEL     = "gemma3:4b"
+BUFFER_SIZE      = 1500   # mennyi nyers mintát tárolunk az elemzéshez
+AI_COOLDOWN      = 35     # mp, ennyi időnként fut újra az AI
+FEATURE_WINDOW_S = 30.0   # az elemzés az utolsó ennyi mp adatából számol
 
-TURN_GYRO_MULT     = 3.0
-TURN_GYRO_MIN      = 18.0
-METEOR_COOLDOWN    = 3.0
-MAX_METEORS        = 1
+# Mozgás küszöbök (szögsebesség, °/s) – a szenzor rögzítéséhez igazítható
+MOTION_LOW_DPS   = 3.0
+MOTION_HIGH_DPS  = 15.0
+TURN_SPEED_DPS   = 60.0   # ennél gyorsabb forgás = testhelyzet-váltás esemény
 
-OLLAMA_URL   = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "gemma3:4b"
-BUFFER_SIZE  = 600   
-AI_COOLDOWN  = 35
+# 1. SZÍNVÁLASZTÁS
+COLORS = {
+    "1": ("Neon Ciano / Kék", (0, 255, 240)),
+    "2": ("Neon Magenta / Pink", (255, 0, 128)),
+    "3": ("Neon Zöld", (57, 255, 20)),
+    "4": ("Neon Narancs", (255, 103, 0)),
+    "5": ("Neon Sárga", (255, 240, 31)),
+    "6": ("Elektromos Lila", (189, 0, 255)),
+    "7": ("Fehér", (255, 255, 255)),
+    "8": ("Fekete / Tus", (20, 20, 20)),
+    "9": ("Klasszikus Piros", (230, 40, 40)),
+    "10": ("Klasszikus Zöld", (40, 180, 60)),
+    "11": ("Klasszikus Kék", (40, 90, 220)),
+    "12": ("Rózsaszín", (240, 120, 180)),
+    "13": ("Menta", (80, 220, 170)),
+    "14": ("Arany", (212, 175, 55)),
+    "15": ("Barna / Föld", (130, 75, 40)),
+    "16": ("Szürke", (140, 140, 140)),
+    "17": ("Korall", (255, 127, 80))
+}
+
+print("\n=== 1. SZÍNVÁLASZTÁS ===")
+for key, (name, _) in COLORS.items():
+    print(f"[{key}] {name}")
+color_choice = input("\nVálassz egy színt (1-17) [Alapértelmezett: 1]: ").strip()
+if color_choice not in COLORS:
+    color_choice = "1"
+SELECTED_COLOR_NAME, DRAW_COLOR = COLORS[color_choice]
+
+# 2. MINTAVÁLASZTÁS
+PATTERNS = {
+    "1": ("SQUARE_SPIRAL", "Spirál Négyzetek (Szögletes organikus alakzatok)"),
+    "2": ("NAUTILUS", "Nautilus (Kagylóhéj / Organikus spirál)"),
+    "3": ("GALAXY_SPIRAL", "Galaxis Spirál (Örvénylő csillagköd)")
+}
+
+print("\n=== 2. MINTAVÁLASZTÁS ===")
+for key, (_, desc) in PATTERNS.items():
+    print(f"[{key}] {desc}")
+pattern_choice = input("\nVálassz egy mintát (1-3) [Alapértelmezett: 1]: ").strip()
+if pattern_choice not in PATTERNS:
+    pattern_choice = "1"
+SELECTED_PATTERN = PATTERNS[pattern_choice][0]
+
+# 3. STÍLUSVÁLASZTÁS
+STYLES = {
+    "1": ("NEON_GLOW", "Cyberpunk Neon (Világító izzás sötét háttéren)"),
+    "2": ("INK_CHARCOAL", "Klasszikus Tusrajz (Művészi papír és mély tónusok)"),
+    "3": ("WATERCOLOR", "Akvarell (Lágy, áttetsző organikus rétegek)"),
+    "4": ("MINIMAL_VECTOR", "Minimalista Vektor (Tűéles, sima vonalak)")
+}
+
+print("\n=== 3. STÍLUSVÁLASZTÁS ===")
+for key, (name, desc) in STYLES.items():
+    print(f"[{key}] {desc}")
+style_choice = input("\nVálassz egy stílust (1-4) [Alapértelmezett: 1]: ").strip()
+if style_choice not in STYLES:
+    style_choice = "1"
+SELECTED_STYLE = STYLES[style_choice][0]
+
+# Háttérszín meghatározása stílus alapján
+if SELECTED_STYLE == "NEON_GLOW":
+    BG_COLOR = (10, 10, 18)
+elif SELECTED_STYLE == "INK_CHARCOAL":
+    BG_COLOR = (242, 238, 226)
+elif SELECTED_STYLE == "WATERCOLOR":
+    BG_COLOR = (248, 246, 240)
+else:  # MINIMAL_VECTOR
+    BG_COLOR = (255, 255, 255) if DRAW_COLOR != (255, 255, 255) else (20, 20, 20)
+
+print(f"\n==========================================")
+print(f" MINTA: {SELECTED_PATTERN} | STÍLUS: {SELECTED_STYLE} | SZÍN: {SELECTED_COLOR_NAME}")
+print(f"==========================================\n")
+
+NUM_PARTICLES = 80
+pulse_min, pulse_max = 4095, 0
+pitch_min, pitch_max = 90.0, -90.0
+
+live_data = {
+    "pulse_raw": 0,
+    "pitch": 0.0,
+    "bpm": 0,
+    "pulse_norm": 0.5,
+    "pitch_norm": 0.5
+}
+
+pulse_history = []
+last_beat_time = time.time()
+
+particle_positions = []
+particle_velocities = []
+paths = []
+
+# =====================================================================
+#  AI / WEB RÉSZ – a BLE-ről érkező adatokból (pulzus + kvaternió)
+# =====================================================================
 
 _lock         = threading.Lock()
-_ir_buffer    = deque(maxlen=SAMPLE_RATE * BPM_WINDOW)
-_red_buffer   = deque(maxlen=SAMPLE_RATE * BPM_WINDOW)
 _sleep_buffer = deque(maxlen=BUFFER_SIZE)
-_latest       = {"ax": 0.0, "ay": 0.0, "az": 1.0,
-                "gx": 0.0, "gy": 0.0, "gz": 0.0,
-                "red": 0,  "ir": 0}
+_latest       = {"pulse": 0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+                 "pitch": 0.0, "roll": 0.0}
 
-def _udp_listener():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("0.0.0.0", UDP_PORT))
-    print(f"[UDP] Listening on port {UDP_PORT}")
-    while True:
-        try:
-            raw, _ = sock.recvfrom(512)
-            pkt = json.loads(raw.decode())
-            pkt["_ts"] = time.time()
-            with _lock:
-                _latest.update(pkt)
-                _sleep_buffer.append(dict(pkt))
-                if pkt.get("ir", 0) > 5000:
-                    _ir_buffer.append(pkt["ir"])
-                    _red_buffer.append(pkt.get("red", 0))
-        except Exception:
-            pass
 
-threading.Thread(target=_udp_listener, daemon=True).start()
+def push_sample(pulse_raw, qx, qy, qz, qw, pitch, roll):
+    """A BLE notification handler hívja minden beérkező mintánál."""
+    pkt = {"pulse": pulse_raw, "qx": qx, "qy": qy, "qz": qz, "qw": qw,
+           "pitch": pitch, "roll": roll, "_ts": time.time()}
+    with _lock:
+        _latest.update(pkt)
+        _sleep_buffer.append(pkt)
+
 
 def get_latest():
     with _lock:
         return dict(_latest)
 
+
 def get_sleep_buffer():
     with _lock:
         return list(_sleep_buffer)
 
-def compute_bpm():
-    with _lock:
-        samples = list(_ir_buffer)
-    if len(samples) < 40:
-        return 72
-    mean = sum(samples) / len(samples)
-    ac   = [s - mean for s in samples]
-    thr  = max(ac) * 0.30
-    peaks = [i for i in range(1, len(ac) - 1)
-             if ac[i] > thr and ac[i] > ac[i-1] and ac[i] > ac[i+1]]
-    if len(peaks) < 2:
-        return 72
-    avg_iv = (sum(peaks[j+1] - peaks[j] for j in range(len(peaks)-1))
-              / (len(peaks)-1)) / SAMPLE_RATE
-    return max(40, min(200, int(60.0 / avg_iv)))
 
-def compute_spo2():
-    with _lock:
-        ir_l, red_l = list(_ir_buffer), list(_red_buffer)
-    if len(ir_l) < 40 or len(red_l) < 40:
-        return 97
-    dc_ir, dc_red = sum(ir_l) / len(ir_l), sum(red_l) / len(red_l)
-    if dc_ir < 1 or dc_red < 1:
-        return 97
-    ac_ir, ac_red = max(ir_l) - min(ir_l), max(red_l) - min(red_l)
-    r = (ac_red / dc_red) / (ac_ir / dc_ir)
-    return max(85, min(100, int(110 - 25 * r)))
+def calculate_roll(qx, qy, qz, qw):
+    return math.degrees(math.atan2(2.0 * (qw * qx + qy * qz),
+                                   1.0 - 2.0 * (qx * qx + qy * qy)))
 
-def gyro_magnitude(p):
-    return math.sqrt(p.get("gx", 0)**2 + p.get("gy", 0)**2 + p.get("gz", 0)**2)
 
-def accel_horizontal(p):
-    return math.sqrt(p.get("ax", 0)**2 + p.get("ay", 0)**2)
+def _quat_angle_deg(a, b):
+    """Két kvaternió közötti szögelfordulás fokban."""
+    dot = (a["qx"] * b["qx"] + a["qy"] * b["qy"] +
+           a["qz"] * b["qz"] + a["qw"] * b["qw"])
+    dot = min(1.0, abs(dot))
+    return math.degrees(2.0 * math.acos(dot))
+
 
 _ai_lock        = threading.Lock()
 _last_ai_time   = 0.0
 _last_ai_result = {}
 _ai_busy        = False
 
+
 def _compute_sleep_features():
     data = get_sleep_buffer()
-    n    = len(data)
+    if len(data) < 10:
+        return None
+
+    t_end = data[-1]["_ts"]
+    win = [d for d in data if t_end - d["_ts"] <= FEATURE_WINDOW_S]
+    n = len(win)
     if n < 10:
         return None
 
-    ax_l = [d["ax"] for d in data]
-    ay_l = [d["ay"] for d in data]
-    az_l = [d["az"] for d in data]
-    gx_l = [d.get("gx", 0) for d in data]
-    gy_l = [d.get("gy", 0) for d in data]
-    gz_l = [d.get("gz", 0) for d in data]
+    pulses  = [d["pulse"] for d in win]
+    pitches = [d["pitch"] for d in win]
+    rolls   = [d["roll"]  for d in win]
+    dur_s   = max(0.001, win[-1]["_ts"] - win[0]["_ts"])
 
-    sma      = sum(abs(ax_l[i]) + abs(ay_l[i]) + abs(az_l[i]) for i in range(n)) / n
-    ax_mean  = sum(ax_l) / n
-    variance = sum((x - ax_mean) ** 2 for x in ax_l) / n
-    gyro_mag = sum(math.sqrt(gx_l[i]**2 + gy_l[i]**2 + gz_l[i]**2)
-                   for i in range(n)) / n
+    # --- pulzus statisztika (nyers ADC érték) ---
+    pulse_mean  = sum(pulses) / n
+    pulse_std   = math.sqrt(sum((p - pulse_mean) ** 2 for p in pulses) / n)
+    pulse_range = max(pulses) - min(pulses)
 
-    try:
-        pitch = math.atan2(ax_l[-1],
-                math.sqrt(ay_l[-1]**2 + az_l[-1]**2)) * 180 / math.pi
-        roll  = math.atan2(ay_l[-1], az_l[-1]) * 180 / math.pi
-    except Exception:
-        pitch = roll = 0.0
+    # --- mozgás: szögsebesség a kvaternió-változásokból ---
+    speeds = []
+    for i in range(1, n):
+        dt_i = win[i]["_ts"] - win[i - 1]["_ts"]
+        if dt_i > 0.001:
+            speeds.append(_quat_angle_deg(win[i - 1], win[i]) / dt_i)
+    motion_mean = sum(speeds) / len(speeds) if speeds else 0.0
+    motion_max  = max(speeds) if speeds else 0.0
 
-    turns = sum(1 for i in range(1, n)
-                if abs(ax_l[i] - ax_l[i-1]) > 0.25
-                or abs(ay_l[i] - ay_l[i-1]) > 0.25)
+    # testhelyzet-váltás események (felfutó élek)
+    turns = 0
+    above = False
+    for s in speeds:
+        if s > TURN_SPEED_DPS and not above:
+            turns += 1
+            above = True
+        elif s <= TURN_SPEED_DPS:
+            above = False
 
-    ir_l  = [d["ir"]        for d in data if d.get("ir",  0) > 1000]
-    red_l = [d.get("red",0) for d in data if d.get("ir",  0) > 1000]
-    spo2_val = hr_bpm = None
+    # --- szögek ---
+    pitch_now = pitches[-1]
+    roll_now  = rolls[-1]
+    pitch_mean = sum(pitches) / n
+    pitch_var  = sum((x - pitch_mean) ** 2 for x in pitches) / n
 
-    if len(ir_l) >= 10:
-        ir_mean  = sum(ir_l)  / len(ir_l)
-        red_mean = sum(red_l) / len(red_l)
-        if ir_mean > 0:
-            spo2_val = round(max(85.0, min(100.0, 110.0 - 25.0 * (red_mean / ir_mean))), 1)
-        if len(ir_l) >= 20:
-            thr   = ir_mean * 1.005
-            peaks = sum(1 for i in range(1, len(ir_l)-1)
-                        if ir_l[i] > thr
-                        and ir_l[i] > ir_l[i-1]
-                        and ir_l[i] > ir_l[i+1])
-            dur_s = len(ir_l) / 20.0
-            if dur_s > 2:
-                cand   = round(peaks / dur_s * 60)
-                hr_bpm = cand if 30 < cand < 200 else None
+    # --- pulzus (BPM) csúcsdetektálással, időbélyegek alapján ---
+    hr_bpm = None
+    hrv_ms = None
+    peak_times = []
+    for i in range(20, n - 1):
+        avg = sum(pulses[i - 20:i]) / 20.0
+        if (pulses[i] > avg + 80 and pulses[i] >= pulses[i - 1]
+                and pulses[i] > pulses[i + 1]):
+            tt = win[i]["_ts"]
+            if not peak_times or (tt - peak_times[-1]) > 0.4:
+                peak_times.append(tt)
+    if len(peak_times) >= 3:
+        ivs = [peak_times[j + 1] - peak_times[j] for j in range(len(peak_times) - 1)]
+        mean_iv = sum(ivs) / len(ivs)
+        cand = round(60.0 / mean_iv)
+        if 30 < cand < 200:
+            hr_bpm = cand
+            hrv_ms = round(math.sqrt(sum((x - mean_iv) ** 2 for x in ivs) / len(ivs)) * 1000, 1)
 
-    motion = ("high" if sma > 0.10 else "low" if sma < 0.02 else "moderate")
+    motion = ("high" if motion_mean > MOTION_HIGH_DPS
+              else "low" if motion_mean < MOTION_LOW_DPS else "moderate")
 
     return {
-        "sma":         round(sma, 4),
-        "variance":    round(variance, 5),
-        "gyro_mag":    round(gyro_mag, 2),
-        "pitch":       round(pitch, 1),
-        "roll":        round(roll, 1),
+        "motion_dps":  round(motion_mean, 2),
+        "motion_max":  round(motion_max, 1),
+        "pitch_var":   round(pitch_var, 3),
+        "pitch":       round(pitch_now, 1),
+        "roll":        round(roll_now, 1),
         "turns":       turns,
-        "spo2":        spo2_val,
+        "pulse_mean":  round(pulse_mean, 1),
+        "pulse_std":   round(pulse_std, 1),
+        "pulse_range": int(pulse_range),
         "hr_bpm":      hr_bpm,
+        "hrv_ms":      hrv_ms,
         "samples":     n,
+        "window_s":    round(dur_s, 1),
         "motion":      motion,
-        "has_optical": len(ir_l) > 0,
     }
+
 
 def _ollama_analyze(features):
     global _ai_busy
     _ai_busy = True
-    spo2_s = f"{features['spo2']} %" if features['spo2'] else "not available"
-    hr_s   = f"{features['hr_bpm']} bpm" if features['hr_bpm'] else "not available"
+    hr_s  = f"{features['hr_bpm']} bpm" if features['hr_bpm'] else "not available"
+    hrv_s = f"{features['hrv_ms']} ms" if features['hrv_ms'] is not None else "not available"
 
     prompt = f"""You are a sleep analysis AI. Analyze the sleep state based on the following sensor data.
 
-SENSOR DATA (last ~30 sec):
-- Motion intensity (SMA): {features['sma']} g  [{features['motion']}]
-- Motion variance: {features['variance']}
-- Gyroscope activity: {features['gyro_mag']} °/s
+SENSOR DATA (last ~{features['window_s']} sec):
+- Motion intensity (mean angular speed): {features['motion_dps']} °/s  [{features['motion']}]
+- Peak angular speed: {features['motion_max']} °/s
+- Pitch variance: {features['pitch_var']}
 - Pitch angle: {features['pitch']}°
 - Roll angle: {features['roll']}°
-- Position changes: {features['turns']} db
-- SpO2: {spo2_s}
-- Pulzus: {hr_s}
+- Position changes: {features['turns']}
+- Pulse (estimated heart rate): {hr_s}
+- Beat interval variability (SDNN): {hrv_s}
+- Raw pulse signal mean / std / range: {features['pulse_mean']} / {features['pulse_std']} / {features['pulse_range']}
 - Sample count: {features['samples']}
 
 GUIDELINES:
-- SMA < 0.02 and variance < 0.001 = deep sleep or REM
-- SMA 0.02–0.08 = light sleep
-- SMA > 0.08 = awake or restless
+- Motion < {MOTION_LOW_DPS} °/s and low pitch variance = deep sleep or REM
+- Motion {MOTION_LOW_DPS}-{MOTION_HIGH_DPS} °/s = light sleep
+- Motion > {MOTION_HIGH_DPS} °/s = awake or restless
+- High beat interval variability with very low motion can indicate REM
 - Pitch ~0° and roll ~0° = lying on back
 - Roll > 45° = right side, Roll < -45° = left side
 - Pitch > 30° = lying on stomach
 
 Reply ONLY with valid JSON, no other text, explanation or formatting:
-{{"sleep_stage":"awake|light sleep|deep sleep|REM","quality_score":0-100,"body_position":"on back|left side|right side|on stomach","restlessness":"calm|moderate|restless","spo2_status":"normal|low|not measurable","summary":"1-2 sentence English summary of the current state","tips":["tip1","tip2"]}}"""
+{{"sleep_stage":"awake|light sleep|deep sleep|REM","quality_score":0-100,"body_position":"on back|left side|right side|on stomach","restlessness":"calm|moderate|restless","summary":"1-2 sentence English summary of the current state","tips":["tip1","tip2"]}}"""
 
     try:
         resp = requests.post(OLLAMA_URL, json={
@@ -232,6 +327,7 @@ Reply ONLY with valid JSON, no other text, explanation or formatting:
     _ai_busy = False
     return result
 
+
 def get_sleep_analysis():
     global _last_ai_time, _last_ai_result
     features = _compute_sleep_features()
@@ -243,6 +339,7 @@ def get_sleep_analysis():
         _last_ai_result = _ollama_analyze(features)
         _last_ai_time   = time.time()
     return features, _last_ai_result, cached
+
 
 flask_app = Flask(__name__)
 
@@ -481,9 +578,11 @@ DASHBOARD_HTML = """
 </html>
 """
 
+
 @flask_app.route("/")
 def flask_index():
     return render_template_string(DASHBOARD_HTML)
+
 
 @flask_app.route("/api/analysis")
 def flask_analysis():
@@ -500,9 +599,11 @@ def flask_analysis():
         "timestamp": datetime.now().isoformat(),
     })
 
+
 @flask_app.route("/api/raw")
 def flask_raw():
     return jsonify(get_sleep_buffer()[-60:])
+
 
 @flask_app.route("/api/status")
 def flask_status():
@@ -514,532 +615,310 @@ def flask_status():
         "latest_packet": get_latest(),
     })
 
+
 def _run_flask():
     import logging
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
     flask_app.run(host="0.0.0.0", port=FLASK_PORT,
                   debug=False, use_reloader=False)
 
-threading.Thread(target=_run_flask, daemon=True).start()
-time.sleep(0.3)  # Flask indulási idő
-import socket as _sock
-try:
-    _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
-    _s.connect(("8.8.8.8", 80))
-    _my_ip = _s.getsockname()[0]
-    _s.close()
-    print(f"[Flask] *** Sleep Analyzer: http://{_my_ip}:{FLASK_PORT} ***")
-    print(f"[Flask] Ha nem éred el: sudo ufw allow {FLASK_PORT}")
-except Exception as _e:
-    print(f"[Flask] IP detektálás sikertelen: {_e}")
-    print(f"[Flask] Próbáld: hostname -I")
 
-pygame.init()
-pygame.mouse.set_visible(False)
-if os.environ.get("SLEEPART_WINDOWED") == "1":
-    screen = pygame.display.set_mode((1280, 720))
-else:
-    screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-WIDTH, HEIGHT = screen.get_size()
-CENTER = (WIDTH // 2, HEIGHT // 2)
-pygame.display.set_caption("SleepArt · Cosmos")
-clock = pygame.time.Clock()
+def start_web():
+    threading.Thread(target=_run_flask, daemon=True).start()
+    time.sleep(0.3)  # Flask indulási idő
+    try:
+        _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _s.connect(("8.8.8.8", 80))
+        _my_ip = _s.getsockname()[0]
+        _s.close()
+        print(f"[Flask] *** Sleep Analyzer: http://{_my_ip}:{FLASK_PORT} ***")
+        print(f"[Flask] Ha nem éred el: sudo ufw allow {FLASK_PORT}")
+    except Exception as _e:
+        print(f"[Flask] IP detektálás sikertelen: {_e}")
+        print(f"[Flask] Próbáld: hostname -I")
 
-FONT_BIG   = pygame.font.SysFont("monospace", 46, bold=True)
-FONT_MED   = pygame.font.SysFont("monospace", 24, bold=True)
-FONT_SMALL = pygame.font.SysFont("monospace", 16)
 
-def lerp(a, b, t): return a + (b - a) * t
+# =====================================================================
+#  ALKOTÁS RÉSZ
+# =====================================================================
 
-def lerp_color(c1, c2, t):
-    return tuple(int(lerp(c1[i], c2[i], t)) for i in range(3))
+def init_particles_for_pattern():
+    global particle_positions, particle_velocities, paths
+    particle_positions.clear()
+    particle_velocities.clear()
+    paths.clear()
 
-def brighten(c, f=1.6):
-    return tuple(min(255, int(v * f)) for v in c)
-
-PALETTES = {
-    "awake": [(255, 150, 95), (255, 205, 120), (255, 95, 150)],
-    "light": [(120, 180, 255), (165, 140, 255), (80, 225, 220)],
-    "deep":  [(70, 60, 165), (35, 35, 115), (115, 70, 205)],
-    "rem":   [(255, 95, 220), (120, 255, 210), (165, 120, 255)],
-    "alert": [(255, 70, 70), (255, 140, 60), (235, 30, 90)],
-}
-
-def palette_color(stage, t):
-    colors = PALETTES[stage]
-    n = len(colors)
-    pos = (t * 0.09) % n
-    i = int(pos)
-    return lerp_color(colors[i], colors[(i + 1) % n], pos - i)
-
-def make_gradient(w, h, top, bottom):
-    surf = pygame.Surface((w, h))
-    for y in range(h):
-        pygame.draw.line(surf, lerp_color(top, bottom, y / h), (0, y), (w, y))
-    return surf
-
-BG_GRADIENT = make_gradient(WIDTH, HEIGHT, (10, 7, 24), (3, 3, 11))
-nebula_layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-star_layer   = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-fx_layer     = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-
-class Star:
-    def __init__(self):
-        self.x = random.uniform(0, WIDTH)
-        self.y = random.uniform(0, HEIGHT)
-        self.r = random.uniform(0.6, 2.1)
-        self.phase = random.uniform(0, math.tau)
-        self.speed = random.uniform(0.3, 0.9)
-        self.drift = random.uniform(1.5, 6.0)
-
-    def draw(self, t):
-        a = int(70 + 150 * (0.5 + 0.5 * math.sin(t * self.speed + self.phase)))
-        pygame.draw.circle(star_layer, (210, 220, 255, a),
-                            (int(self.x), int(self.y)), max(1, int(self.r)))
-        self.x += self.drift * 0.02
-        if self.x > WIDTH + 4:
-            self.x = -4
-
-STARS = [Star() for _ in range(160)]
-
-NEBULA_FADE = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-NEBULA_FADE.fill((250, 250, 250, 250))
-
-def glow(target, pos, radius, color, layers=6, max_alpha=150):
-    radius = max(2, int(radius))
-    x, y = int(pos[0]), int(pos[1])
-    for i in range(layers, 0, -1):
-        r = int(radius * i / layers)
-        if r <= 0:
-            continue
-        a = int(max_alpha * (1 - i / layers) ** 1.3) + 6
-        s = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
-        pygame.draw.circle(s, (*color, a), (r, r), r)
-        target.blit(s, (x - r, y - r), special_flags=pygame.BLEND_RGBA_ADD)
-
-def add_nebula_bloom(pos, color, radius):
-    glow(nebula_layer, pos, radius, color, layers=7, max_alpha=80)
-
-class Ring:
-    def __init__(self, center, color, max_r, speed=130, width=3):
-        self.cx, self.cy = center
-        self.r = 4.0
-        self.color = color
-        self.max_r = max_r
-        self.speed = speed
-        self.width = width
-
-    def update(self, dt):
-        self.r += self.speed * dt
-
-    @property
-    def alive(self):
-        return self.r < self.max_r
-
-    def draw(self, surf):
-        t = self.r / self.max_r
-        a = max(0, int(210 * (1 - t)))
-        if a > 1:
-            pygame.draw.circle(surf, (*self.color, a),
-                                (int(self.cx), int(self.cy)), int(self.r), self.width)
-
-class Spark:
-    def __init__(self, pos, color, speed_range=(60, 260)):
-        ang = random.uniform(0, math.tau)
-        spd = random.uniform(*speed_range)
-        self.x, self.y = pos
-        self.vx, self.vy = math.cos(ang) * spd, math.sin(ang) * spd
-        self.color = color
-        self.life = random.uniform(0.5, 1.3)
-        self.age = 0.0
-        self.r = random.uniform(1.5, 3.5)
-
-    def update(self, dt):
-        self.age += dt
-        self.x += self.vx * dt
-        self.y += self.vy * dt
-        self.vx *= 0.96
-        self.vy *= 0.96
-
-    @property
-    def alive(self):
-        return self.age < self.life
-
-    def draw(self, surf):
-        t = self.age / self.life
-        a = max(0, int(255 * (1 - t)))
-        if a > 1:
-            pygame.draw.circle(surf, (*self.color, a), (int(self.x), int(self.y)),
-                                max(1, int(self.r * (1 - t * 0.6))))
-
-class Meteor:
-    def __init__(self, start, angle, distance, color, speed, size):
-        self.x, self.y = start
-        self.vx, self.vy = math.cos(angle) * speed, math.sin(angle) * speed
-        self.tx = start[0] + math.cos(angle) * distance
-        self.ty = start[1] + math.sin(angle) * distance
-        self.color = color
-        self.size = size
-        self.trail = deque(maxlen=10)
-        self.exploded = False
-
-    def update(self, dt):
-        self.trail.append((self.x, self.y))
-        self.x += self.vx * dt
-        self.y += self.vy * dt
-        if math.hypot(self.x - self.tx, self.y - self.ty) < self.size * 1.4:
-            self.exploded = True
-
-    def draw(self, surf):
-        n = len(self.trail)
-        for i, (px, py) in enumerate(self.trail):
-            a = int(170 * (i / max(1, n)))
-            r = max(1, int(self.size * 0.5 * (i / max(1, n))))
-            pygame.draw.circle(surf, (*self.color, a), (int(px), int(py)), r)
-        glow(surf, (self.x, self.y), self.size * 1.6, brighten(self.color, 1.2), layers=4)
-
-rings, sparks, meteors = [], [], []
-last_meteor_t  = 0.0
-
-def classify_stage(elapsed, motion_avg, bpm_recent):
-    if elapsed < 25:
-        return "awake"
-    if motion_avg > 0.07:
-        return "awake"
-    if motion_avg > 0.025:
-        return "light"
-    if len(bpm_recent) >= 3:
-        m = sum(bpm_recent) / len(bpm_recent)
-        var = sum((b - m) ** 2 for b in bpm_recent) / len(bpm_recent)
-        if var > 18:
-            return "rem"
-    return "deep"
-
-class CycleAverager:
-    def __init__(self):
-        self.samples = {"motion": [], "bpm": [], "spo2": []}
-        self.cycle_start = time.time()
-        self.prev = {"motion": 0.02, "bpm": 70, "spo2": 97, "stage": "awake"}
-        self.cur  = dict(self.prev)
-        self.bpm_recent = deque(maxlen=12)
-        self.log = []
-
-    def add_sample(self, motion, bpm, spo2):
-        self.samples["motion"].append(motion)
-        self.samples["bpm"].append(bpm)
-        self.samples["spo2"].append(spo2)
-
-    def maybe_roll(self, elapsed):
-        if time.time() - self.cycle_start < CYCLE_SECONDS:
-            return
-        self.prev = dict(self.cur)
-        avg_motion = sum(self.samples["motion"]) / max(1, len(self.samples["motion"]))
-        avg_bpm    = sum(self.samples["bpm"])    / max(1, len(self.samples["bpm"]))
-        avg_spo2   = sum(self.samples["spo2"])   / max(1, len(self.samples["spo2"]))
-        self.bpm_recent.append(avg_bpm)
-        stage = classify_stage(elapsed, avg_motion, list(self.bpm_recent))
-        self.cur = {"motion": avg_motion, "bpm": avg_bpm, "spo2": avg_spo2, "stage": stage}
-        self.log.append({"t": round(elapsed), **{k: round(v, 2) if isinstance(v, float) else v
-                                                   for k, v in self.cur.items()}})
-        self.samples = {"motion": [], "bpm": [], "spo2": []}
-        self.cycle_start = time.time()
-
-    def smoothed(self):
-        progress = min(1.0, (time.time() - self.cycle_start) / CYCLE_SECONDS)
-        motion = lerp(self.prev["motion"], self.cur["motion"], progress)
-        bpm    = lerp(self.prev["bpm"],    self.cur["bpm"],    progress)
-        spo2   = lerp(self.prev["spo2"],   self.cur["spo2"],   progress)
-        stage  = self.cur["stage"] if progress > 0.5 else self.prev["stage"]
-        return motion, bpm, spo2, stage
-
-cycle = CycleAverager()
-
-def save_session(surface):
-    ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = f"cosmos_{ts}"
-    img_path = os.path.join(SAVE_DIR, base + ".png")
-    pygame.image.save(surface, img_path)
-    log_path = os.path.join(SAVE_DIR, base + ".json")
-    with open(log_path, "w") as f:
-        json.dump({"session_seconds": SESSION_SECONDS, "cycles": cycle.log}, f, indent=2)
-    print(f"[Cosmos] Mentve: {img_path}")
-    return img_path
-
-def finger_to_pixel(fx, fy):
-    return int(fx * WIDTH), int(fy * HEIGHT)
-
-ORB_MARGIN     = 90
-ORB_MIN_COUNT  = 2
-ORB_MAX_COUNT  = 9
-ORB_MIN_LIFE   = 6.0
-ORB_MAX_LIFE   = 16.0
-ORB_FADE_TIME  = 1.8 
-
-class Orb:
-    """Egy 'test': 2-4 koncentrikus körvonalból álló, lebegő, ki-be fakuló alakzat."""
-    def __init__(self, now):
-        self.x = random.uniform(ORB_MARGIN, WIDTH - ORB_MARGIN)
-        self.y = random.uniform(ORB_MARGIN, HEIGHT - ORB_MARGIN)
-        self.phase    = random.uniform(0, math.tau)
-        self.speed    = random.uniform(0.05, 0.13)
-        self.drift_r  = random.uniform(6, 20)
-        self.hue_off  = random.uniform(0, 3.0)
-        self.beat_off = random.uniform(-0.15, 0.15)
-        self.born     = now
-        self.life     = random.uniform(ORB_MIN_LIFE, ORB_MAX_LIFE)
-        self.n_rings  = random.randint(2, 4)
-        self.ring_gap = random.uniform(7, 13)
-        self.base_r   = random.uniform(9, 22)
-        self.ring_widths = [random.choice([1, 1, 2, 2, 3, 4]) for _ in range(self.n_rings)]
-
-    def position(self, t):
-        x = self.x + math.cos(t * self.speed + self.phase) * self.drift_r
-        y = self.y + math.sin(t * self.speed * 0.8 + self.phase) * self.drift_r
-        return x, y
-
-    def alpha_factor(self, now):
-        age = now - self.born
-        if age < ORB_FADE_TIME:
-            return age / ORB_FADE_TIME
-        remain = self.life - age
-        if remain < ORB_FADE_TIME:
-            return max(0.0, remain / ORB_FADE_TIME)
-        return 1.0
-
-    def is_dead(self, now):
-        return (now - self.born) >= self.life
-
-class OrbField:
-    """Kezeli a 'testek' véletlenszerű meg- és eltűnését – néha több,
-    néha kevesebb van belőlük egyszerre, sosem fix a darabszám."""
-    def __init__(self):
-        self.orbs = []
-        self.target = random.randint(ORB_MIN_COUNT, ORB_MAX_COUNT)
-        self.next_retarget = time.time() + random.uniform(6.0, 12.0)
-
-    def reset(self):
-        self.orbs = []
-        self.target = random.randint(ORB_MIN_COUNT, ORB_MAX_COUNT)
-        self.next_retarget = time.time() + random.uniform(6.0, 12.0)
-
-    def update(self, dt, now):
-        if now > self.next_retarget:
-            self.target = random.randint(ORB_MIN_COUNT, ORB_MAX_COUNT)
-            self.next_retarget = now + random.uniform(6.0, 13.0)
-        self.orbs = [o for o in self.orbs if not o.is_dead(now)]
-        if len(self.orbs) < self.target and random.random() < dt * 0.5:
-            self.orbs.append(Orb(now))
-
-    def random_position(self, t):
-        if not self.orbs:
-            return CENTER
-        return random.choice(self.orbs).position(t)
-
-orb_field = OrbField()
-
-def ring_outline(surface, center, radius, color, alpha_mult=1.0, width=2):
-    """Egyetlen, lágyan derengő körvonal (nem kitöltött kör)."""
-    if radius <= 1.5 or alpha_mult <= 0.02:
-        return
-    cx, cy = int(center[0]), int(center[1])
-    for i in range(4, 0, -1):
-        a = int(45 * (1 - i / 4) * alpha_mult)
-        if a <= 1:
-            continue
-        for rr in (radius + i * 1.8, radius - i * 1.8):
-            if rr > 1:
-                pygame.draw.circle(surface, (*color, a), (cx, cy), int(rr), 1)
-    core_a = int(200 * alpha_mult)
-    if core_a > 1:
-        pygame.draw.circle(surface, (*color, core_a), (cx, cy), int(radius), max(1, width))
-
-def draw_orbs(t, heartbeat_phase, stage, alert, motion):
-    eff = "alert" if alert else stage
-    now = time.time()
-    for orb in orb_field.orbs:
-        af = orb.alpha_factor(now)
-        if af <= 0.02:
-            continue
-        x, y = orb.position(t)
-        pulse = 1.0 + 0.05 * math.sin((heartbeat_phase + orb.beat_off) * math.tau)
-        jitter = math.sin(t * 1.5 + orb.hue_off) * (0.5 + min(1.0, motion / 0.08) * 1.2)
-        for ring_i in range(orb.n_rings):
-            r = (orb.base_r + ring_i * orb.ring_gap) * pulse + jitter
-            col = palette_color(eff, t + orb.hue_off + ring_i * 0.35)
-            ring_outline(fx_layer, (x, y), r, col, alpha_mult=af * (1 - ring_i * 0.12),
-                         width=orb.ring_widths[ring_i])
-
-PHASE_INTRO, PHASE_SESSION, PHASE_REVIEW = "intro", "session", "review"
-phase = PHASE_INTRO
-session_start = 0.0
-heartbeat_phase = 0.0
-frozen_frame = None
-running = True
-
-SAVE_RECT    = pygame.Rect(CENTER[0] - 230, CENTER[1] + 60, 200, 64)
-DISCARD_RECT = pygame.Rect(CENTER[0] + 30,  CENTER[1] + 60, 200, 64)
-
-def reset_session():
-    global session_start, heartbeat_phase, rings, sparks, meteors, last_meteor_t
-    nebula_layer.fill((0, 0, 0, 0))
-    session_start = time.time()
-    heartbeat_phase = 0.0
-    rings, sparks, meteors = [], [], []
-    last_meteor_t = 0.0
-    cycle.__init__()
-    orb_field.reset()
-
-def spawn_meteor(angle, intensity, color, origin=None):
-    if len(meteors) >= MAX_METEORS:
-        return
-    if origin is None:
-        origin = orb_field.random_position(time.time())
-    dist  = min(WIDTH, HEIGHT) * random.uniform(0.28, 0.42)
-    speed = 300 + intensity * 4
-    size  = 9 + min(14, intensity * 0.18)
-    meteors.append(Meteor(origin, angle, dist, color, speed, size))
-
-while running:
-    dt = clock.tick(30) / 1000.0
-    now = time.time()
-    t = now
-
-    for e in pygame.event.get():
-        if e.type == pygame.QUIT:
-            running = False
-        elif e.type == pygame.KEYDOWN:
-            if e.key == pygame.K_q:
-                running = False
-            elif e.key == pygame.K_ESCAPE:
-                if phase == PHASE_SESSION:
-                    phase = PHASE_REVIEW
-                    frozen_frame = screen.copy()
-                else:
-                    running = False
-            elif phase == PHASE_INTRO and e.key == pygame.K_SPACE:
-                reset_session(); phase = PHASE_SESSION
-            elif phase == PHASE_REVIEW and e.key == pygame.K_s:
-                save_session(frozen_frame); phase = PHASE_INTRO
-            elif phase == PHASE_REVIEW and e.key == pygame.K_r:
-                phase = PHASE_INTRO
-        elif e.type in (pygame.MOUSEBUTTONDOWN, pygame.FINGERDOWN):
-            if e.type == pygame.MOUSEBUTTONDOWN:
-                px, py = e.pos
+    for i in range(NUM_PARTICLES):
+        if SELECTED_PATTERN == "SQUARE_SPIRAL":
+            # Négyzet alakú elrendezésből induló szálak
+            side = i % 4
+            layer = (i // 4) * 12 + 15
+            if side == 0:
+                px, py = CANVAS_W / 2 - layer, CANVAS_H / 2 - layer
+                vx, vy = 1.5, 0.0
+            elif side == 1:
+                px, py = CANVAS_W / 2 + layer, CANVAS_H / 2 - layer
+                vx, vy = 0.0, 1.5
+            elif side == 2:
+                px, py = CANVAS_W / 2 + layer, CANVAS_H / 2 + layer
+                vx, vy = -1.5, 0.0
             else:
-                px, py = finger_to_pixel(e.x, e.y)
-            if phase == PHASE_INTRO:
-                reset_session(); phase = PHASE_SESSION
-            elif phase == PHASE_REVIEW:
-                if SAVE_RECT.collidepoint(px, py):
-                    save_session(frozen_frame); phase = PHASE_INTRO
-                elif DISCARD_RECT.collidepoint(px, py):
-                    phase = PHASE_INTRO
+                px, py = CANVAS_W / 2 - layer, CANVAS_H / 2 + layer
+                vx, vy = 0.0, -1.5
 
-    fx_layer.fill((0, 0, 0, 0))
-    star_layer.fill((0, 0, 0, 0))
-    nebula_layer.blit(NEBULA_FADE, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-    for s in STARS:
-        s.draw(t)
+        elif SELECTED_PATTERN == "NAUTILUS":
+            angle = (i / NUM_PARTICLES) * 4 * math.pi
+            r = 10 + i * 2.5
+            px = CANVAS_W / 2 + math.cos(angle) * r
+            py = CANVAS_H / 2 + math.sin(angle) * r
+            vx, vy = math.sin(angle) * 1.2, -math.cos(angle) * 1.2
 
-    screen.blit(BG_GRADIENT, (0, 0))
-    screen.blit(nebula_layer, (0, 0))
-    screen.blit(star_layer, (0, 0))
+        else:  # GALAXY_SPIRAL
+            arm = i % 4
+            angle = (i / NUM_PARTICLES) * 4 * math.pi
+            r = 8 + i * 3
+            px = CANVAS_W / 2 + math.cos(angle + (arm * math.pi / 2)) * r
+            py = CANVAS_H / 2 + math.sin(angle + (arm * math.pi / 2)) * r
+            vx, vy = math.sin(angle) * 1.5, -math.cos(angle) * 1.5
 
-    if phase == PHASE_INTRO:
-        title = FONT_BIG.render("SleepArt · Cosmos", True, (210, 215, 255))
-        screen.blit(title, (CENTER[0] - title.get_width() // 2, CENTER[1] - 80))
-        sub = FONT_MED.render("Tap or press SPACE to begin", True, (150, 160, 210))
-        screen.blit(sub, (CENTER[0] - sub.get_width() // 2, CENTER[1] - 10))
-        glow(screen, CENTER, 90 + 14 * math.sin(t * 1.3), (140, 150, 255), layers=6)
+        pos = np.array([px, py], dtype=float)
+        vel = np.array([vx, vy], dtype=float)
+        particle_positions.append(pos)
+        particle_velocities.append(vel)
+        paths.append([pos.copy()])
 
-    elif phase == PHASE_SESSION:
-        elapsed = now - session_start
+init_particles_for_pattern()
+start_time = None
 
-        p = get_latest()
-        motion_inst = accel_horizontal(p)
-        gmag        = gyro_magnitude(p)
-        bpm_inst    = compute_bpm()
-        spo2_inst   = compute_spo2()
-        cycle.add_sample(motion_inst, bpm_inst, spo2_inst)
-        cycle.maybe_roll(elapsed)
-        motion, bpm, spo2, stage = cycle.smoothed()
+def calculate_pitch(qx, qy, qz, qw):
+    sinp = 2.0 * (qw * qy - qz * qx)
+    if abs(sinp) >= 1:
+        return math.copysign(90.0, sinp)
+    return math.degrees(math.asin(sinp))
 
-        alert = spo2 < 94
-        eff_stage = "alert" if alert else stage
-        color = palette_color(eff_stage, t)
+def process_sensor_data(pulse_raw, pitch_deg, elapsed):
+    global pulse_min, pulse_max, pitch_min, pitch_max, last_beat_time
 
-        orb_field.update(dt, now)
+    if pulse_raw < pulse_min: pulse_min = pulse_raw
+    if pulse_raw > pulse_max: pulse_max = pulse_raw
+    if pitch_deg < pitch_min: pitch_min = pitch_deg
+    if pitch_deg > pitch_max: pitch_max = pitch_deg
 
-        heartbeat_phase += dt * (bpm / 60.0)
-        if heartbeat_phase >= 1.0:
-            heartbeat_phase -= 1.0
-            src = orb_field.random_position(t)
-            rings.append(Ring(src, brighten(color, 1.15),
-                               max_r=120,
-                               speed=80 if not alert else 115))
+    p_denom = max(1, (pulse_max - pulse_min))
+    pulse_norm = (pulse_raw - pulse_min) / p_denom
 
-        if gmag > max(TURN_GYRO_MIN, TURN_GYRO_MULT * 6.0) and (now - last_meteor_t) > METEOR_COOLDOWN:
-            last_meteor_t = now
-            angle = math.atan2(p.get("ay", 0), p.get("ax", 0)) if motion_inst > 0.02 else random.uniform(0, math.tau)
-            spawn_meteor(angle, gmag, brighten(color, 1.2))
+    pitch_denom = max(1.0, (pitch_max - pitch_min))
+    pitch_norm = (pitch_deg - pitch_min) / pitch_denom
 
-        for m in meteors:
-            m.update(dt)
-            m.draw(fx_layer)
-        for m in meteors:
-            if m.exploded:
-                add_nebula_bloom((m.x, m.y), color, radius=55)
-                for _ in range(16):
-                    sparks.append(Spark((m.x, m.y), brighten(color, 1.15)))
-        meteors = [m for m in meteors if not m.exploded]
+    live_data["pulse_raw"] = pulse_raw
+    live_data["pitch"] = round(pitch_deg, 1)
+    live_data["pulse_norm"] = pulse_norm
+    live_data["pitch_norm"] = pitch_norm
 
-        for r in rings:
-            r.update(dt); r.draw(fx_layer)
-        rings = [r for r in rings if r.alive]
+    pulse_history.append(pulse_raw)
+    if len(pulse_history) > 20: pulse_history.pop(0)
+    avg_p = sum(pulse_history) / len(pulse_history)
+    if pulse_raw > avg_p + 80 and (time.time() - last_beat_time) > 0.4:
+        live_data["bpm"] = int(60.0 / (time.time() - last_beat_time))
+        last_beat_time = time.time()
 
-        for s in sparks:
-            s.update(dt); s.draw(fx_layer)
-        sparks = [s for s in sparks if s.alive]
+def update_physics(elapsed):
+    dt = 0.4
+    p_norm = live_data["pulse_norm"]
+    pitch_deg = live_data["pitch"]
+    t = time.time()
 
-        draw_orbs(t, heartbeat_phase, stage, alert, motion)
+    for i in range(NUM_PARTICLES):
+        pos = particle_positions[i]
+        vel = particle_velocities[i]
 
-        screen.blit(fx_layer, (0, 0))
+        if SELECTED_PATTERN == "SQUARE_SPIRAL":
+            cx, cy = CANVAS_W / 2 + pitch_deg * 2.0, CANVAS_H / 2
+            dx, dy = pos[0] - cx, pos[1] - cy
 
-        remain = max(0, SESSION_SECONDS - elapsed)
-        mm, ss = int(remain // 60), int(remain % 60)
-        hud = FONT_SMALL.render(f"{mm}:{ss:02d}   {stage}   BPM~{int(bpm)}   SpO2~{int(spo2)}%   |  Analyzer:{FLASK_PORT}",
-                                 True, (170, 175, 210))
-        hud.set_alpha(150)
-        screen.blit(hud, (16, 14))
-        pygame.draw.rect(screen, (255, 255, 255, 40), (0, HEIGHT - 4, WIDTH, 4))
-        pygame.draw.rect(screen, (*brighten(color, 1.3), 200),
-                          (0, HEIGHT - 4, int(WIDTH * min(1.0, elapsed / SESSION_SECONDS)), 4))
+            # Négyzetes kanyarodási logika
+            if abs(dx) > abs(dy):
+                vx = -np.sign(dy) * (1.2 + p_norm * 1.5)
+                vy = np.sign(dx) * (1.2 + p_norm * 1.5)
+            else:
+                vx = np.sign(dy) * (1.2 + p_norm * 1.5)
+                vy = -np.sign(dx) * (1.2 + p_norm * 1.5)
 
-        if elapsed >= SESSION_SECONDS:
-            phase = PHASE_REVIEW
-            frozen_frame = screen.copy()
-            print("[Cosmos] Session vége → review")
+            # Finom tágulás/összehúzódás pulzus hatására
+            vx += (dx / (abs(dx) + 1)) * (p_norm - 0.5)
+            vy += (dy / (abs(dy) + 1)) * (p_norm - 0.5)
+            vel = np.array([vx, vy])
 
-    elif phase == PHASE_REVIEW:
-        screen.blit(frozen_frame, (0, 0))
-        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        overlay.fill((6, 4, 16, 150))
-        screen.blit(overlay, (0, 0))
+        elif SELECTED_PATTERN == "NAUTILUS":
+            cx, cy = CANVAS_W / 2 + pitch_deg * 2.5, CANVAS_H / 2
+            rx, ry = pos[0] - cx, pos[1] - cy
+            dist = math.sqrt(rx**2 + ry**2) + 0.1
+            rot = 0.04 + p_norm * 0.08
+            vx = -ry / dist * (2.0 + rot * 8) + (rx / dist) * (0.3 + pitch_deg * 0.01)
+            vy = rx / dist * (2.0 + rot * 8) + (ry / dist) * (0.3 + pitch_deg * 0.01)
+            vel = np.array([vx, vy])
 
-        title = FONT_BIG.render("Save this night?", True, (225, 225, 255))
-        screen.blit(title, (CENTER[0] - title.get_width() // 2, CENTER[1] - 110))
+        else:  # GALAXY_SPIRAL
+            cx, cy = CANVAS_W / 2 + pitch_deg * 2.0, CANVAS_H / 2
+            rx, ry = pos[0] - cx, pos[1] - cy
+            dist = math.sqrt(rx**2 + ry**2) + 0.1
+            expansion = math.sin(t * 3.0) * (p_norm * 1.5)
+            vel[0] = -ry / dist * (2.0 + p_norm * 1.5) + (rx / dist) * expansion
+            vel[1] = rx / dist * (2.0 + p_norm * 1.5) + (ry / dist) * expansion
 
-        pygame.draw.rect(screen, (50, 150, 110), SAVE_RECT, border_radius=14)
-        pygame.draw.rect(screen, (120, 230, 180), SAVE_RECT, 2, border_radius=14)
-        st = FONT_MED.render("Save  [S]", True, (255, 255, 255))
-        screen.blit(st, (SAVE_RECT.centerx - st.get_width() // 2, SAVE_RECT.centery - st.get_height() // 2))
+        pos += vel * dt
+        pos[0] = max(10, min(CANVAS_W - 10, pos[0]))
+        pos[1] = max(10, min(CANVAS_H - 10, pos[1]))
 
-        pygame.draw.rect(screen, (160, 60, 90), DISCARD_RECT, border_radius=14)
-        pygame.draw.rect(screen, (235, 130, 160), DISCARD_RECT, 2, border_radius=14)
-        dt_ = FONT_MED.render("Discard  [R]", True, (255, 255, 255))
-        screen.blit(dt_, (DISCARD_RECT.centerx - dt_.get_width() // 2, DISCARD_RECT.centery - dt_.get_height() // 2))
+        particle_positions[i] = pos
+        particle_velocities[i] = vel
+        paths[i].append(pos.copy())
 
-    pygame.display.flip()
+def render_artwork(surface):
+    """Kirendereli az alkotást a kiválasztott művészeti stílus szerint."""
+    surface.fill(BG_COLOR)
 
-pygame.quit()
-print("[Cosmos] Kilépés.")
+    if SELECTED_STYLE == "NEON_GLOW":
+        # Multi-pass rendering a neon izzó hatás eléréséhez
+        glow_surface = pygame.Surface((CANVAS_W, CANVAS_H), pygame.SRCALPHA)
+
+        # 1. Külső széles izzás
+        for path in paths:
+            if len(path) > 1:
+                pts = [(int(p[0]), int(p[1])) for p in path]
+                r, g, b = DRAW_COLOR
+                pygame.draw.lines(glow_surface, (r, g, b, 30), False, pts, 6)
+                pygame.draw.lines(glow_surface, (r, g, b, 70), False, pts, 3)
+                pygame.draw.lines(glow_surface, (255, 255, 255, 200), False, pts, 1)
+        surface.blit(glow_surface, (0, 0))
+
+    elif SELECTED_STYLE == "WATERCOLOR":
+        # Áttetsző, lágy akvarell rétegek
+        water_surface = pygame.Surface((CANVAS_W, CANVAS_H), pygame.SRCALPHA)
+        r, g, b = DRAW_COLOR
+        for path in paths:
+            if len(path) > 1:
+                pts = [(int(p[0]), int(p[1])) for p in path]
+                pygame.draw.lines(water_surface, (r, g, b, 40), False, pts, 3)
+                pygame.draw.lines(water_surface, (r, g, b, 90), False, pts, 1)
+        surface.blit(water_surface, (0, 0))
+
+    elif SELECTED_STYLE == "INK_CHARCOAL":
+        # Sötét tus hatás enyhén lágyított vonalakkal
+        ink_surface = pygame.Surface((CANVAS_W, CANVAS_H), pygame.SRCALPHA)
+        r, g, b = DRAW_COLOR
+        for path in paths:
+            if len(path) > 1:
+                pts = [(int(p[0]), int(p[1])) for p in path]
+                pygame.draw.lines(ink_surface, (r, g, b, 180), False, pts, 2)
+                pygame.draw.lines(ink_surface, (r, g, b, 240), False, pts, 1)
+        surface.blit(ink_surface, (0, 0))
+
+    else:  # MINIMAL_VECTOR
+        # Tűéles, sima 1 pixeles vonalak
+        for path in paths:
+            if len(path) > 1:
+                pts = [(int(p[0]), int(p[1])) for p in path]
+                pygame.draw.lines(surface, DRAW_COLOR, False, pts, 1)
+
+def save_png():
+    """Elmenti a kész képet PNG formátumban a kívánt fájlnéven."""
+    filename = input("\nAdandó fájlnév (kiterjesztés nélkül) [Alapértelmezett: művészi_alkotás]: ").strip()
+    if not filename:
+        filename = "művészi_alkotás"
+
+    if not filename.endswith(".png"):
+        filename += ".png"
+
+    export_surface = pygame.Surface((CANVAS_W, CANVAS_H))
+    render_artwork(export_surface)
+
+    try:
+        pygame.image.save(export_surface, filename)
+        print(f"\n[SIKER] A kép sikeresen elmentve PNG-be: {filename}")
+    except Exception as e:
+        print(f"\n[HIBA] Nem sikerült menteni a PNG képet: {e}")
+
+def notification_handler(sender, data: bytearray):
+    global start_time
+    if start_time is None:
+        start_time = time.time()
+
+    elapsed = time.time() - start_time
+    if elapsed > CYCLE_DURATION: return
+
+    try:
+        payload = json.loads(data.decode('utf-8'))
+        pulse_raw = payload.get("pulse", 0)
+        qx, qy, qz, qw = payload.get("qx", 0), payload.get("qy", 0), payload.get("qz", 0), payload.get("qw", 1)
+
+        pitch = calculate_pitch(qx, qy, qz, qw)
+        roll = calculate_roll(qx, qy, qz, qw)
+
+        # AI / web puffer feltöltése ugyanezekkel az adatokkal
+        push_sample(pulse_raw, qx, qy, qz, qw, pitch, roll)
+
+        process_sensor_data(pulse_raw, pitch, elapsed)
+        update_physics(elapsed)
+    except Exception:
+        pass
+
+async def main():
+    global start_time
+    pygame.init()
+    screen = pygame.display.set_mode((CANVAS_W, CANVAS_H))
+    pygame.display.set_caption(f"Generatív Művészet - {SELECTED_PATTERN} ({SELECTED_STYLE})")
+    font = pygame.font.SysFont("monospace", 14, bold=True)
+
+    print("ESP32-S3 keresése BLE-n...")
+    device = await BleakScanner.find_device_by_name("ESP32S3_Sensors", timeout=10.0)
+    if not device:
+        print("Hiba: Nem található az 'ESP32S3_Sensors' BLE eszköz!")
+        return
+
+    try:
+        async with BleakClient(device) as client:
+            print("Sikeres csatlakozás! Élő rajzolás indítása...")
+            await client.start_notify(CHARACTERISTIC_UUID, notification_handler)
+
+            running = True
+            while running:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT: running = False
+
+                render_artwork(screen)
+
+                elapsed = int(time.time() - start_time) if start_time else 0
+
+                txt_info = font.render(f"MINTA: {SELECTED_PATTERN} | STÍLUS: {SELECTED_STYLE}", True, (180, 180, 180))
+                txt_time = font.render(f"IDŐ: {elapsed}s/300s", True, (220, 80, 80))
+
+                s = pygame.Surface((CANVAS_W, 30), pygame.SRCALPHA)
+                s.fill((0, 0, 0, 160))
+                screen.blit(s, (0, 0))
+
+                screen.blit(txt_info, (10, 6))
+                screen.blit(txt_time, (820, 6))
+
+                pygame.display.flip()
+
+                try:
+                    await asyncio.sleep(0.03)
+                except asyncio.CancelledError:
+                    break
+
+                if start_time and (time.time() - start_time) >= CYCLE_DURATION:
+                    running = False
+
+    except Exception:
+        pass
+    finally:
+        pygame.quit()
+        save_png()
+
+if __name__ == "__main__":
+    start_web()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, asyncio.CancelledError, Exception):
+        pass
