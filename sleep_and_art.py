@@ -17,23 +17,21 @@ from bleak import BleakClient, BleakScanner
 SERVICE_UUID = "4fa8c2d1-8253-4243-9780-7005a3674630"
 CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
-CYCLE_DURATION = 300.0  # 5 perc
+CYCLE_DURATION = 300.0 
 CANVAS_W, CANVAS_H = 1000, 600
 
-# ---------- AI / WEB beállítások ----------
+
 FLASK_PORT       = 5000
 OLLAMA_URL       = "http://localhost:11434/api/generate"
 OLLAMA_MODEL     = "gemma3:4b"
-BUFFER_SIZE      = 1500   # mennyi nyers mintát tárolunk az elemzéshez
-AI_COOLDOWN      = 35     # mp, ennyi időnként fut újra az AI
-FEATURE_WINDOW_S = 30.0   # az elemzés az utolsó ennyi mp adatából számol
+BUFFER_SIZE      = 1500  
+AI_COOLDOWN      = 35    
+FEATURE_WINDOW_S = 30.0  
 
-# Mozgás küszöbök (szögsebesség, °/s) – a szenzor rögzítéséhez igazítható
 MOTION_LOW_DPS   = 3.0
 MOTION_HIGH_DPS  = 15.0
-TURN_SPEED_DPS   = 60.0   # ennél gyorsabb forgás = testhelyzet-váltás esemény
+TURN_SPEED_DPS   = 60.0  
 
-# 1. SZÍNVÁLASZTÁS
 COLORS = {
     "1": ("Neon Ciano / Kék", (0, 255, 240)),
     "2": ("Neon Magenta / Pink", (255, 0, 128)),
@@ -62,7 +60,6 @@ if color_choice not in COLORS:
     color_choice = "1"
 SELECTED_COLOR_NAME, DRAW_COLOR = COLORS[color_choice]
 
-# 2. MINTAVÁLASZTÁS
 PATTERNS = {
     "1": ("SQUARE_SPIRAL", "Spirál Négyzetek (Szögletes organikus alakzatok)"),
     "2": ("NAUTILUS", "Nautilus (Kagylóhéj / Organikus spirál)"),
@@ -77,7 +74,6 @@ if pattern_choice not in PATTERNS:
     pattern_choice = "1"
 SELECTED_PATTERN = PATTERNS[pattern_choice][0]
 
-# 3. STÍLUSVÁLASZTÁS
 STYLES = {
     "1": ("NEON_GLOW", "Cyberpunk Neon (Világító izzás sötét háttéren)"),
     "2": ("INK_CHARCOAL", "Klasszikus Tusrajz (Művészi papír és mély tónusok)"),
@@ -93,14 +89,13 @@ if style_choice not in STYLES:
     style_choice = "1"
 SELECTED_STYLE = STYLES[style_choice][0]
 
-# Háttérszín meghatározása stílus alapján
 if SELECTED_STYLE == "NEON_GLOW":
     BG_COLOR = (10, 10, 18)
 elif SELECTED_STYLE == "INK_CHARCOAL":
     BG_COLOR = (242, 238, 226)
 elif SELECTED_STYLE == "WATERCOLOR":
     BG_COLOR = (248, 246, 240)
-else:  # MINIMAL_VECTOR
+else:
     BG_COLOR = (255, 255, 255) if DRAW_COLOR != (255, 255, 255) else (20, 20, 20)
 
 print(f"\n==========================================")
@@ -125,10 +120,6 @@ last_beat_time = time.time()
 particle_positions = []
 particle_velocities = []
 paths = []
-
-# =====================================================================
-#  AI / WEB RÉSZ – a BLE-ről érkező adatokból (pulzus + kvaternió)
-# =====================================================================
 
 _lock         = threading.Lock()
 _sleep_buffer = deque(maxlen=BUFFER_SIZE)
@@ -190,12 +181,10 @@ def _compute_sleep_features():
     rolls   = [d["roll"]  for d in win]
     dur_s   = max(0.001, win[-1]["_ts"] - win[0]["_ts"])
 
-    # --- pulzus statisztika (nyers ADC érték) ---
     pulse_mean  = sum(pulses) / n
     pulse_std   = math.sqrt(sum((p - pulse_mean) ** 2 for p in pulses) / n)
     pulse_range = max(pulses) - min(pulses)
 
-    # --- mozgás: szögsebesség a kvaternió-változásokból ---
     speeds = []
     for i in range(1, n):
         dt_i = win[i]["_ts"] - win[i - 1]["_ts"]
@@ -204,7 +193,6 @@ def _compute_sleep_features():
     motion_mean = sum(speeds) / len(speeds) if speeds else 0.0
     motion_max  = max(speeds) if speeds else 0.0
 
-    # testhelyzet-váltás események (felfutó élek)
     turns = 0
     above = False
     for s in speeds:
@@ -214,13 +202,11 @@ def _compute_sleep_features():
         elif s <= TURN_SPEED_DPS:
             above = False
 
-    # --- szögek ---
     pitch_now = pitches[-1]
     roll_now  = rolls[-1]
     pitch_mean = sum(pitches) / n
     pitch_var  = sum((x - pitch_mean) ** 2 for x in pitches) / n
 
-    # --- pulzus (BPM) csúcsdetektálással, időbélyegek alapján ---
     hr_bpm = None
     hrv_ms = None
     peak_times = []
@@ -625,7 +611,7 @@ def _run_flask():
 
 def start_web():
     threading.Thread(target=_run_flask, daemon=True).start()
-    time.sleep(0.3)  # Flask indulási idő
+    time.sleep(0.3)
     try:
         _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         _s.connect(("8.8.8.8", 80))
@@ -637,11 +623,6 @@ def start_web():
         print(f"[Flask] IP detektálás sikertelen: {_e}")
         print(f"[Flask] Próbáld: hostname -I")
 
-
-# =====================================================================
-#  ALKOTÁS RÉSZ
-# =====================================================================
-
 def init_particles_for_pattern():
     global particle_positions, particle_velocities, paths
     particle_positions.clear()
@@ -650,7 +631,6 @@ def init_particles_for_pattern():
 
     for i in range(NUM_PARTICLES):
         if SELECTED_PATTERN == "SQUARE_SPIRAL":
-            # Négyzet alakú elrendezésből induló szálak
             side = i % 4
             layer = (i // 4) * 12 + 15
             if side == 0:
@@ -673,7 +653,7 @@ def init_particles_for_pattern():
             py = CANVAS_H / 2 + math.sin(angle) * r
             vx, vy = math.sin(angle) * 1.2, -math.cos(angle) * 1.2
 
-        else:  # GALAXY_SPIRAL
+        else:
             arm = i % 4
             angle = (i / NUM_PARTICLES) * 4 * math.pi
             r = 8 + i * 3
@@ -736,7 +716,6 @@ def update_physics(elapsed):
             cx, cy = CANVAS_W / 2 + pitch_deg * 2.0, CANVAS_H / 2
             dx, dy = pos[0] - cx, pos[1] - cy
 
-            # Négyzetes kanyarodási logika
             if abs(dx) > abs(dy):
                 vx = -np.sign(dy) * (1.2 + p_norm * 1.5)
                 vy = np.sign(dx) * (1.2 + p_norm * 1.5)
@@ -744,7 +723,6 @@ def update_physics(elapsed):
                 vx = np.sign(dy) * (1.2 + p_norm * 1.5)
                 vy = -np.sign(dx) * (1.2 + p_norm * 1.5)
 
-            # Finom tágulás/összehúzódás pulzus hatására
             vx += (dx / (abs(dx) + 1)) * (p_norm - 0.5)
             vy += (dy / (abs(dy) + 1)) * (p_norm - 0.5)
             vel = np.array([vx, vy])
@@ -758,7 +736,7 @@ def update_physics(elapsed):
             vy = rx / dist * (2.0 + rot * 8) + (ry / dist) * (0.3 + pitch_deg * 0.01)
             vel = np.array([vx, vy])
 
-        else:  # GALAXY_SPIRAL
+        else: 
             cx, cy = CANVAS_W / 2 + pitch_deg * 2.0, CANVAS_H / 2
             rx, ry = pos[0] - cx, pos[1] - cy
             dist = math.sqrt(rx**2 + ry**2) + 0.1
@@ -779,10 +757,8 @@ def render_artwork(surface):
     surface.fill(BG_COLOR)
 
     if SELECTED_STYLE == "NEON_GLOW":
-        # Multi-pass rendering a neon izzó hatás eléréséhez
         glow_surface = pygame.Surface((CANVAS_W, CANVAS_H), pygame.SRCALPHA)
 
-        # 1. Külső széles izzás
         for path in paths:
             if len(path) > 1:
                 pts = [(int(p[0]), int(p[1])) for p in path]
@@ -793,7 +769,6 @@ def render_artwork(surface):
         surface.blit(glow_surface, (0, 0))
 
     elif SELECTED_STYLE == "WATERCOLOR":
-        # Áttetsző, lágy akvarell rétegek
         water_surface = pygame.Surface((CANVAS_W, CANVAS_H), pygame.SRCALPHA)
         r, g, b = DRAW_COLOR
         for path in paths:
@@ -804,7 +779,6 @@ def render_artwork(surface):
         surface.blit(water_surface, (0, 0))
 
     elif SELECTED_STYLE == "INK_CHARCOAL":
-        # Sötét tus hatás enyhén lágyított vonalakkal
         ink_surface = pygame.Surface((CANVAS_W, CANVAS_H), pygame.SRCALPHA)
         r, g, b = DRAW_COLOR
         for path in paths:
@@ -814,8 +788,7 @@ def render_artwork(surface):
                 pygame.draw.lines(ink_surface, (r, g, b, 240), False, pts, 1)
         surface.blit(ink_surface, (0, 0))
 
-    else:  # MINIMAL_VECTOR
-        # Tűéles, sima 1 pixeles vonalak
+    else: 
         for path in paths:
             if len(path) > 1:
                 pts = [(int(p[0]), int(p[1])) for p in path]
@@ -855,7 +828,6 @@ def notification_handler(sender, data: bytearray):
         pitch = calculate_pitch(qx, qy, qz, qw)
         roll = calculate_roll(qx, qy, qz, qw)
 
-        # AI / web puffer feltöltése ugyanezekkel az adatokkal
         push_sample(pulse_raw, qx, qy, qz, qw, pitch, roll)
 
         process_sensor_data(pulse_raw, pitch, elapsed)
